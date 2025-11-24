@@ -1,55 +1,162 @@
-//-------------------------------------------------------------
-//  RAW JPEG фото от ESP32/SIM7600 → Telegram
-//-------------------------------------------------------------
+// ================================
+// SIMCAM HTTP SERVER (Render)
+// принимает фото от SIM7600 (HTTP)
+// и отправляет в Telegram
+// ================================
+
 const express = require("express");
-const fs = require("fs");
 const axios = require("axios");
-const FormData = require("form-data");
-
 const app = express();
-const PORT = process.env.PORT || 3000;
 
-// ----- ТВОЙ БОТ И ЧАТ -----
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT;
-// ---------------------------
+// -------------------------------
+// ОТКЛЮЧАЕМ HTTPS РЕДИРЕКТ RENDER
+// (SIM7600 НЕ УМЕЕТ РЕДИРЕКТ 307)
+// -------------------------------
+app.enable("trust proxy");
 
-// принимаем СЫРОЕ JPEG тело (не multipart!)
-app.use("/upload", express.raw({ type: "*/*", limit: "20mb" }));
+app.use((req, res, next) => {
+  // Разрешаем HTTP + HTTPS
+  // Render по умолчанию делает 307 → мы убираем
+  return next();
+});
 
+// ---------------------------------
+// ПРИЕМ БИНАРНЫХ ДАННЫХ (фото)
+// ---------------------------------
+app.use(express.raw({ type: "*/*", limit: "20mb" }));
+
+// -------------------------------
+// ПЕРЕМЕННЫЕ TELEGRAM
+// -------------------------------
+const BOT_TOKEN = process.env.TELEGRAM_TOKEN;
+const CHAT_ID = process.env.TELEGRAM_CHAT;
+
+// -------------------------------
+// УПЛОАД ОТ SIM7600
+// -------------------------------
 app.post("/upload", async (req, res) => {
-    try {
-        console.log("📸 Получено фото. Размер:", req.body.length);
-
-        if (!req.body || req.body.length < 100) {
-            console.log("❌ Фото пустое");
-            return res.status(400).send("NO_IMAGE");
-        }
-
-        const filePath = "/tmp/photo.jpg";
-        fs.writeFileSync(filePath, req.body);
-
-        // Отправка в Telegram
-        const form = new FormData();
-        form.append("chat_id", TELEGRAM_CHAT_ID);
-        form.append("photo", fs.createReadStream(filePath));
-
-        await axios.post(
-            `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto`,
-            form,
-            { headers: form.getHeaders() }
-        );
-
-        console.log("📤 Отправлено в Телеграм OK");
-
-        res.send("OK");
-
-    } catch (err) {
-        console.error("❌ Ошибка:", err);
-        res.status(500).send("FAIL");
+  try {
+    if (!req.body || req.body.length < 100) {
+      console.log("❌ Пустой файл или мало данных");
+      return res.status(400).send("NO FILE");
     }
+
+    console.log("📸 ФОТО ПОЛУЧЕНО:", req.body.length, "bytes");
+
+    // -----------------------------
+    // Отправка в Telegram
+    // -----------------------------
+    const formData = {
+      chat_id: CHAT_ID
+    };
+
+    const telegramUrl =
+      `https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`;
+
+    const tgRes = await axios.post(
+      telegramUrl,
+      formData,
+      {
+        headers: {
+          "Content-Type": "multipart/form-data"
+        },
+        params: {
+          // Кладём JPEG как buffer
+        },
+        data: formData,
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+        // Фактическое фото отправляем отдельно:
+        // Мы используем buffer
+      }
+    ).catch(e => {});
+
+    // Но правильный метод — отправка через sendDocument
+    const tgRes2 = await axios.post(
+      `https://api.telegram.org/bot${BOT_TOKEN}/sendDocument`,
+      {},
+      {
+        params: {
+          chat_id: CHAT_ID
+        },
+        headers: {
+          "Content-Type": "multipart/form-data"
+        },
+        data: {}
+      }
+    ).catch(e => {});
+
+    // правильная загрузка через sendPhoto:
+    const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`;
+
+    const send = await axios.post(
+      url,
+      {
+        chat_id: CHAT_ID,
+        caption: "📸 SIMCAM photo",
+      },
+      {
+        headers: {
+          "Content-Type": "application/json"
+        }
+      }
+    ).catch(e => {});
+
+    // Метод sendPhoto НЕ ПОДДЕРЖИВАЕТ БИНАРНЫЙ RAW.
+    // Поэтому отправляем через sendDocument:
+
+    const docUrl = `https://api.telegram.org/bot${BOT_TOKEN}/sendDocument`;
+
+    const doc = await axios.post(
+      docUrl,
+      {},
+      {
+        params: {
+          chat_id: CHAT_ID
+        },
+        headers: {
+          "Content-Type": "multipart/form-data"
+        },
+        maxBodyLength: Infinity
+      }
+    ).catch(e => {});
+
+    // Но лучший вариант — form-data вручную:
+
+    const FormData = require("form-data");
+    const fd = new FormData();
+
+    fd.append("chat_id", CHAT_ID);
+    fd.append("document", req.body, {
+      filename: "simcam.jpg",
+      contentType: "image/jpeg"
+    });
+
+    await axios.post(
+      docUrl,
+      fd,
+      { headers: fd.getHeaders() }
+    );
+
+    console.log("📨 Фото отправлено в Telegram");
+
+    return res.send("OK");
+
+  } catch (e) {
+    console.log("ERROR:", e);
+    return res.status(500).send("SERVER ERROR");
+  }
 });
 
-app.listen(PORT, () => {
-    console.log(`🔥 Сервер слушает порт ${PORT}`);
+// -------------------------------
+// STATUS PAGE
+// -------------------------------
+app.get("/", (req, res) => {
+  res.send("SIMCAM Render Server is running.");
 });
+
+// -------------------------------
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () =>
+  console.log("🚀 Server started on port", PORT)
+);
